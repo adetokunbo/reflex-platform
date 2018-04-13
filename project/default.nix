@@ -1,7 +1,7 @@
 this:
 
 let
-  inherit (this) nixpkgs mapSet;
+  inherit (this) nixpkgs;
   inherit (nixpkgs.lib) mapAttrs mapAttrsToList escapeShellArg
     optionalString concatStringsSep concatMapStringsSep;
 in
@@ -137,30 +137,34 @@ in
 
 }:
 let
-
-  overrides' = nixpkgs.lib.composeExtensions
+  inherit (nixpkgs.lib) composeExtensions optionalAttrs inNixShell;
+  inherit (builtins) hasAttr;
+  overrides' = composeExtensions
     (self: super: mapAttrs (name: path: self.callCabal2nix name path {}) packages) overrides;
-  mkPkgSet = name: _ :
-    let mkPkgSet' = this.${name}.override { overrides = overrides'; };
 
-        # For native builds on MacOS, add an empty index.html to the bin directory on
-        # post-install (cf https://github.com/reflex-frp/reflex-platform/issues/209)
-        addIndexHtmlOnPostInstall = pkg: pkg.override {
-          mkDerivation = drv: this.ghc.mkDerivation (drv // {
-            postInstall = ''
-              mkdir -p $out/bin
-              touch $out/bin/index.html
-            '';
-          });
-        };
-    in if name == "ghc" && this.system == "x86_64-darwin"
-       then mapSet addIndexHtmlOnPostInstall mkPkgSet'
-       else mkPkgSet';
+  # For native builds on MacOS, add an empty index.html to the bin directory on
+  # post-install (cf https://github.com/reflex-frp/reflex-platform/issues/209)
+  addIndexHtmlOnPostInstall = drv: drv.overrideAttrs (_: {
+      postInstall = ''
+        mkdir -p $out/bin
+        touch $out/bin/index.html
+      '';
+    });
+  darwinOverrides = composeExtensions
+    (self: super: mapAttrs (name: path: addIndexHtmlOnPostInstall (self.callCabal2nix name path {})) packages) overrides;
+
+  mkPkgSet = name: _ :
+    # Note: the darwin override is disabled when running in the nix shell.
+    # In the nix-shell, it's not need, as the exes are not owned by Nix
+    # Also, it does not work due to complexities in workOnMulti'
+    if this.system == "x86_64-darwin" && name == "ghc" && !inNixShell
+       then this.${name}.override { overrides = darwinOverrides; }
+       else this.${name}.override { overrides = overrides'; };
 
   prj = mapAttrs mkPkgSet shells // {
     shells = mapAttrs (name: pnames:
       this.workOnMulti' {
-        env = prj.${name}.override { overrides = self: super: nixpkgs.lib.optionalAttrs withHoogle {
+        env = prj.${name}.override { overrides = self: super: optionalAttrs withHoogle {
           ghcWithPackages = self.ghcWithHoogle;
         }; };
         packageNames = pnames;
